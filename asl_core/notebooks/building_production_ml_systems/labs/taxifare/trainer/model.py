@@ -1,11 +1,11 @@
-# pylint: skip-file
+"""Data prep, train and evaluate DNN model."""
 
 import logging
 import os
 
-import keras
 import numpy as np
 import tensorflow as tf
+import keras
 from keras import callbacks
 from keras.layers import (
     Concatenate,
@@ -19,11 +19,13 @@ from keras.layers import (
 )
 from keras.metrics import RootMeanSquaredError
 
-
 def parse_csv(row):
     ds = tf.strings.split(row, ",")
+    # Label: fare_amount
     label = tf.strings.to_number(ds[0])
+    # Features: pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude
     feature = tf.strings.to_number(ds[2:6])  # use some features only
+    # Passing feature in tuple so that we can handle them separately.
     return (feature[0], feature[1], feature[2], feature[3]), label
 
 
@@ -36,7 +38,6 @@ def create_dataset(pattern, batch_size, num_repeat, mode="eval"):
     ds = ds.repeat(num_repeat).batch(batch_size, drop_remainder=True)
     return ds
 
-
 def parse_lat_lon(row):
     columns = tf.strings.split(row, ",")
     # latitude idx: 3 and 5, longitude idx: 2 and 4
@@ -45,7 +46,6 @@ def parse_lat_lon(row):
     lat_features = tf.strings.to_number(lat_strings)
     lon_features = tf.strings.to_number(lon_strings)
     return lat_features, lon_features
-
 
 def adapt_normalize(train_data_path):
     ds = tf.data.Dataset.list_files(train_data_path)
@@ -102,33 +102,25 @@ def transform(inputs, nbuckets, normalizers):
     dlat = Discretization(latbuckets, name="dlat_bkt")(scaled_dlat)
 
     # Feature Cross with HashedCrossing layer
-    p_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="p_fc")(
-        (plon, plat)
-    )
-    d_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="d_fc")(
-        (dlon, dlat)
-    )
-    pd_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 4, name="pd_fc")(
-        (p_fc, d_fc)
-    )
+    p_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="p_fc")((plon, plat))
+    d_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="d_fc")((dlon, dlat))
+    pd_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 4, name="pd_fc")((p_fc, d_fc))
 
     # Embedding with Embedding layer
     pd_embed = Flatten()(
-        Embedding(
-            input_dim=(nbuckets + 1) ** 4, output_dim=10, name="pd_embed"
-        )(pd_fc)
+        Embedding(input_dim=(nbuckets + 1) ** 4, output_dim=10, name="pd_embed")(
+            pd_fc
+        )
     )
 
-    transformed = Concatenate()(
-        [
-            scaled_plon,
-            scaled_dlon,
-            scaled_plat,
-            scaled_dlat,
-            euclidean_distance,
-            pd_embed,
-        ]
-    )
+    transformed = Concatenate()([
+        scaled_plon,
+        scaled_dlon,
+        scaled_plat,
+        scaled_dlat,
+        euclidean_distance, 
+        pd_embed
+    ])
 
     return transformed
 
@@ -155,13 +147,18 @@ def build_dnn_model(nbuckets, nnsize, lr, normalizers):
 
     model = keras.Model(inputs=list(inputs.values()), outputs=output)
 
-    # TODO 1a: Your code here
+    lr_optimizer = keras.optimizers.Adam(learning_rate=lr)
+    model.compile(optimizer=lr_optimizer, loss="mse", metrics=[RootMeanSquaredError()])
+
 
     return model
 
 
 def train_and_evaluate(hparams):
     # TODO 1b: Your code here
+    batch_size = hparams["batch_size"]
+    nbuckets = hparams["nbuckets"]
+    lr = hparams["lr"]
     nnsize = [int(s) for s in hparams["nnsize"].split()]
     eval_data_path = hparams["eval_data_path"]
     num_evals = hparams["num_evals"]
@@ -183,10 +180,7 @@ def train_and_evaluate(hparams):
     logging.info(model.summary())
 
     trainds = create_dataset(
-        pattern=train_data_path,
-        batch_size=batch_size,
-        num_repeat=None,
-        mode="train",
+        pattern=train_data_path, batch_size=batch_size, num_repeat=None, mode="train"
     )
 
     evalds = create_dataset(
@@ -195,7 +189,9 @@ def train_and_evaluate(hparams):
 
     steps_per_epoch = num_examples_to_train_on // (batch_size * num_evals)
 
-    checkpoint_cb = callbacks.ModelCheckpoint(checkpoint_path, verbose=1)
+    checkpoint_cb = callbacks.ModelCheckpoint(
+        checkpoint_path, verbose=1
+    )
     tensorboard_cb = callbacks.TensorBoard(tensorboard_path, histogram_freq=1)
 
     history = model.fit(

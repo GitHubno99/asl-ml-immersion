@@ -1,11 +1,12 @@
-# pylint: skip-file
+"""Data prep, train and evaluate DNN model."""
 
 import logging
 import os
+import hypertune
 
-import keras
 import numpy as np
 import tensorflow as tf
+import keras
 from keras import callbacks
 from keras.layers import (
     Concatenate,
@@ -19,11 +20,13 @@ from keras.layers import (
 )
 from keras.metrics import RootMeanSquaredError
 
-
 def parse_csv(row):
     ds = tf.strings.split(row, ",")
+    # Label: fare_amount
     label = tf.strings.to_number(ds[0])
+    # Features: pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude
     feature = tf.strings.to_number(ds[2:6])  # use some features only
+    # Passing feature in tuple so that we can handle them separately.
     return (feature[0], feature[1], feature[2], feature[3]), label
 
 
@@ -102,33 +105,25 @@ def transform(inputs, nbuckets, normalizers):
     dlat = Discretization(latbuckets, name="dlat_bkt")(scaled_dlat)
 
     # Feature Cross with HashedCrossing layer
-    p_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="p_fc")(
-        (plon, plat)
-    )
-    d_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="d_fc")(
-        (dlon, dlat)
-    )
-    pd_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 4, name="pd_fc")(
-        (p_fc, d_fc)
-    )
+    p_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="p_fc")((plon, plat))
+    d_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 2, name="d_fc")((dlon, dlat))
+    pd_fc = HashedCrossing(num_bins=(nbuckets + 1) ** 4, name="pd_fc")((p_fc, d_fc))
 
     # Embedding with Embedding layer
     pd_embed = Flatten()(
-        Embedding(
-            input_dim=(nbuckets + 1) ** 4, output_dim=10, name="pd_embed"
-        )(pd_fc)
+        Embedding(input_dim=(nbuckets + 1) ** 4, output_dim=10, name="pd_embed")(
+            pd_fc
+        )
     )
 
-    transformed = Concatenate()(
-        [
-            scaled_plon,
-            scaled_dlon,
-            scaled_plat,
-            scaled_dlat,
-            euclidean_distance,
-            pd_embed,
-        ]
-    )
+    transformed = Concatenate()([
+        scaled_plon,
+        scaled_dlon,
+        scaled_plat,
+        scaled_dlat,
+        euclidean_distance, 
+        pd_embed
+    ])
 
     return transformed
 
@@ -154,17 +149,26 @@ def build_dnn_model(nbuckets, nnsize, lr, normalizers):
     output = Dense(1, name="fare")(x)
 
     model = keras.Model(inputs=list(inputs.values()), outputs=output)
-    # TODO 1a
     lr_optimizer = keras.optimizers.Adam(learning_rate=lr)
-    model.compile(
-        optimizer=lr_optimizer, loss="mse", metrics=[RootMeanSquaredError()]
-    )
+    model.compile(optimizer=lr_optimizer, loss="mse", metrics=[RootMeanSquaredError()])
 
     return model
 
+# Instantiate the HyperTune reporting object
+hpt = hypertune.HyperTune()
+
+# Reporting callback
+class HPTCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        global hpt
+        hpt.report_hyperparameter_tuning_metric(
+            hyperparameter_metric_tag="val_rmse",
+            metric_value=logs["val_root_mean_squared_error"],
+            global_step=epoch,
+        )
+
 
 def train_and_evaluate(hparams):
-    # TODO 1b
     batch_size = hparams["batch_size"]
     nbuckets = hparams["nbuckets"]
     lr = hparams["lr"]
@@ -189,10 +193,7 @@ def train_and_evaluate(hparams):
     logging.info(model.summary())
 
     trainds = create_dataset(
-        pattern=train_data_path,
-        batch_size=batch_size,
-        num_repeat=None,
-        mode="train",
+        pattern=train_data_path, batch_size=batch_size, num_repeat=None, mode="train"
     )
 
     evalds = create_dataset(
@@ -201,7 +202,9 @@ def train_and_evaluate(hparams):
 
     steps_per_epoch = num_examples_to_train_on // (batch_size * num_evals)
 
-    checkpoint_cb = callbacks.ModelCheckpoint(checkpoint_path, verbose=1)
+    checkpoint_cb = callbacks.ModelCheckpoint(
+        checkpoint_path, verbose=1
+    )
     tensorboard_cb = callbacks.TensorBoard(tensorboard_path, histogram_freq=1)
 
     history = model.fit(
@@ -210,7 +213,7 @@ def train_and_evaluate(hparams):
         epochs=num_evals,
         steps_per_epoch=max(1, steps_per_epoch),
         verbose=2,  # 0=silent, 1=progress bar, 2=one line per epoch
-        callbacks=[checkpoint_cb, tensorboard_cb],
+        callbacks=[checkpoint_cb, tensorboard_cb, HPTCallback()],
     )
 
     # Save the Keras model file.
